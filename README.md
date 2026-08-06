@@ -1,67 +1,168 @@
-# DownOrWhy
+# downorwhy
 
-DownOrWhy explains why a website is down, slow, blocked, or misconfigured.
+CLI-инструмент диагностики веб-сайтов. Принимает URL, выполняет набор проверок (DNS, TLS, HTTP, редиректы, заголовки, кэширование, производительность, безопасность, IPv4/IPv6) и возвращает структурированный отчёт: что не работает или работает некорректно, на каком уровне возникла проблема, кто за неё отвечает, и какими командами это можно проверить самостоятельно.
 
-Give it a public URL. It returns an engineering report that states whether the
-site is reachable, what is broken or risky, the probable root cause, the
-affected layer (DNS, TLS, HTTP, CDN, cache, performance, security, hosting),
-who is expected to fix it, and the exact commands to verify the problem
-yourself.
+Однобинарное приложение. Не требует конфигурации. Не имеет внешних зависимостей во время выполнения. Не использует браузер, JS-движок, языковые модели. Не собирает телеметрию.
 
-Terminal-first. No frontend, no SPA, no browser engine, no JavaScript
-execution, no language model. Reports are static JSON, Markdown, HTML or
-plain text.
+```bash
+downorwhy https://example.com
+```
 
-## Status
+---
 
-Under active development. See CHANGELOG.md for what is implemented.
+## Назначение
 
-## Install
+Диагностика проблем сайта обычно требует последовательной проверки нескольких независимых систем: DNS, TLS-сертификат, заголовки ответа, поведение CDN, сетевые тайминги. `downorwhy` выполняет все эти проверки за один запрос и формирует единый отчёт с разбивкой по критичности и ответственной стороне (DNS-провайдер, хостинг, DevOps, backend, frontend, security).
 
-    go install github.com/downorwhy/downorwhy/cmd/downorwhy@latest
+## Аудитория и назначение отчёта
 
-## Use
+Отчёт формируется как единый документ, но структурирован так, что разные специалисты используют разные его части:
 
-    downorwhy https://example.com
-    downorwhy scan https://example.com --format json
-    downorwhy scan https://example.com --format html --output report.html
-    downorwhy scan https://example.com --fail-on critical
+| Роль | Используемые данные |
+|---|---|
+| Владелец сайта | Общий статус и оценка состояния (0–100) в текстовом виде |
+| Поддержка | Список находок с меткой ответственного — маршрутизация обращения без привлечения инженеров |
+| Frontend-инженер | Заголовки, кэширование, метрики производительности, mixed-content |
+| Backend-инженер | HTTP-статус, TTFB, цепочка редиректов, атрибуты cookie |
+| DevOps/SRE | Результаты DNS-резолвинга (4 резолвера), цепочка TLS-сертификатов, статус CDN-кэша, асимметрия IPv4/IPv6, тайминги по фазам запроса |
+| Инженер по безопасности | Заголовки безопасности (HSTS, CSP), состояние TLS, атрибуты cookie, конфигурация CORS, раскрытие информации о сервере |
 
-Markdown is the default when stdout is a terminal; JSON otherwise, so the tool
-composes with `jq` and CI pipelines without extra flags.
+## Состав проверок
 
-## Exit codes
+Реализовано 9 проверок. Каждая — чистая функция, оперирующая одним набором наблюдений (единственный HTTP-запрос и единственный набор DNS-ответов на весь пайплайн; повторные сетевые обращения не выполняются).
 
-| Code | Meaning |
-| ---- | ------- |
-| 0 | Scan completed, no critical findings |
-| 1 | Scan completed, critical findings present |
-| 2 | Invalid input or unsafe target |
-| 3 | Internal error |
-| 4 | Target unreachable or timed out; report still produced |
+- **DNS** — системный резолвер и DoH-запросы к Cloudflare, Google, Quad9; записи A/AAAA, цепочки CNAME, задержка по каждому резолверу, расхождения между резолверами, бит DNSSEC AD, обнаружение NXDOMAIN/SERVFAIL/таймаута.
+- **TLS** — ручной TLS-handshake с самостоятельной валидацией: срок действия сертификата, соответствие hostname, обнаружение самоподписанных сертификатов, проверка цепочки доверия относительно системных корневых сертификатов, согласованная версия протокола, набор шифров, проверка доступности TLS 1.0.
+- **HTTP** — классификация кода состояния (5xx — критично, 4xx — предупреждение, 3xx — информационно), используемый протокол (HTTP/1.1 или h2), наличие сжатия, признак усечения тела ответа.
+- **Редиректы** — обнаружение циклов, понижение HTTPS до HTTP, переход между www и без www, небезопасный адрес назначения (приватный IP, метаданные облака), некорректный заголовок Location.
+- **Заголовки** — наличие HSTS, CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy; конфликт CORS wildcard с credentials; атрибуты Set-Cookie (Secure, HttpOnly, SameSite).
+- **CDN/кэширование** — статус CF-Cache-Status, обобщённый X-Cache, конфликты Cache-Control (no-store, private, public в сочетании с Set-Cookie), значения Age, ETag, Last-Modified, Vary.
+- **Производительность** — TTFB (предупреждение при >1500 мс, критично при >3000 мс), общее время (порог 10000/20000 мс), размер тела ответа (5/15 МБ), тайминги DNS и TLS-рукопожатия, приблизительная пропускная способность. Все метрики собираются локально через `net/http/httptrace`. Опционально — интеграция с PageSpeed Insights по ключу из переменной окружения.
+- **Безопасность** — раскрытие данных о сервере через заголовки Server, X-Powered-By, X-AspNet-Version; количество mixed-content ссылок в теле HTML; признаки открытого листинга директорий; проверка адресной принадлежности резолвленного IP.
+- **IPv4/IPv6** — наличие записей A и AAAA, семейство адресов фактически установленного соединения.
 
-## Safety
+## Формирование отчёта
 
-DownOrWhy is a network scanner and is built to be safe to run from CI and from
-a server. It refuses loopback, private, link-local, unique-local, multicast and
-reserved addresses, and cloud metadata endpoints, both for the input URL and
-for every redirect hop and every resolved IP. Bodies are capped at 10 MiB,
-redirects at 10 hops, and query strings are redacted in reports by default.
-See docs/security.md.
+Каждая проверка возвращает статус (`pass`, `warn`, `fail`, `skipped`), длительность выполнения, текстовое резюме, набор ключ-значение и список находок. Проверка не прерывает выполнение пайплайна и не завершает процесс аварийно — при внутренней ошибке результату присваивается статус `error`, и обработка продолжается. Отчёт формируется всегда, включая случаи полной недоступности цели.
 
-## Documentation
+Оценка состояния (`healthScore`) вычисляется по детерминированной формуле: `fail` вычитает 25 баллов, `warn` — 10 баллов; статусы `skipped` и `error` штрафа не несут. Итоговый диапазон определяет статус: `≥85` — healthy, `≥50` — degraded, `<50` — down.
 
-- docs/product.md — what the product does and for whom
-- docs/architecture.md — package layout and scan pipeline
-- docs/report-schema.md — report JSON schema
-- docs/cli.md — CLI reference
-- docs/github-action.md — GitHub Action usage
-- docs/api-server.md — local API server
-- docs/security.md — security controls
-- docs/threat-model.md — threat model
-- docs/compliance-controls.md — control mapping for audit preparation
-- docs/development.md — building, testing, contributing
+Каждая находка содержит: уровень критичности, слой (dns/tls/http/...), заголовок, описание вероятной причины, свидетельства (данные конкретной проверки) и метку ответственного (dns-provider, hosting-provider, devops, backend, frontend, security, user). Дополнительно формируются рекомендации с приоритетом и список shell-команд для самостоятельной проверки указанной проблемы.
 
-## License
+Пример структуры JSON-отчёта:
 
-Apache-2.0. See LICENSE.
+```json
+{
+  "overallStatus": "degraded",
+  "healthScore": 62,
+  "reachable": true,
+  "finalUrl": "https://example.com/",
+  "checks": { "dns": {}, "tls": {}, "http": {} },
+  "findings": {
+    "critical": [],
+    "warnings": [
+      {
+        "layer": "security",
+        "title": "Отсутствует заголовок HSTS",
+        "description": "Сайт не форсирует использование HTTPS для последующих запросов.",
+        "owner": "security",
+        "evidence": { "header": "Strict-Transport-Security", "present": false }
+      }
+    ],
+    "info": []
+  },
+  "recommendations": [
+    { "title": "Добавить HSTS", "owner": "Security Team", "priority": "high" }
+  ],
+  "commands": [
+    { "title": "Проверить заголовок HSTS", "command": "curl -sI https://example.com | grep -i strict-transport" }
+  ]
+}
+```
+
+## Установка
+
+```bash
+# через Go toolchain
+go install github.com/downorwhy/downorwhy/cmd/downorwhy@latest
+
+# готовые бинарники: linux/darwin/windows, amd64/arm64
+# доступны в разделе GitHub Releases (статический бинарник, ~15 МБ)
+
+# Docker
+docker run ghcr.io/downorwhy/downorwhy scan https://example.com
+```
+
+## Использование
+
+```bash
+downorwhy https://example.com                       # отчёт в Markdown
+downorwhy -s https://example.com                     # краткий вывод, одна строка на находку
+downorwhy scan https://example.com --format json
+downorwhy scan https://example.com --format html -o report.html
+downorwhy scan https://example.com --fail-on warning
+downorwhy scan https://example.com --timeout 30000
+downorwhy scan https://example.com --no-redact
+```
+
+По умолчанию формат вывода — Markdown, если stdout является терминалом, и JSON — при перенаправлении вывода. Коды завершения: `0` — критичных находок нет, `1` — найдены проблемы на заданном пороге, `2` — некорректный или небезопасный URL, `3` — внутренняя ошибка, `4` — цель недоступна (отчёт при этом формируется).
+
+### GitHub Action
+
+```yaml
+- uses: downorwhy/downorwhy-action@v1
+  with:
+    url: https://example.com
+    format: markdown
+    fail-on: critical
+    output: report.md
+```
+
+Экшен основан на Docker-образе, добавляет job summary и завершается с кодом 1 при превышении заданного порога критичности.
+
+### API-сервер
+
+```
+POST /v1/scan  {"url": "https://example.com"}  →  JSON-отчёт
+GET  /healthz                                  →  {"status": "ok"}
+```
+
+Без состояния, без базы данных. Небезопасные цели отклоняются с кодом 422.
+
+## Защита от SSRF
+
+Для каждого устанавливаемого соединения проверяется принадлежность адреса к списку запрещённых диапазонов: loopback, приватные сети (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, CGNAT `100.64.0.0/10`), link-local, unique-local, multicast, unspecified, зарезервированные/документационные/бенчмарк-диапазоны, а также известные конечные точки метаданных облачных провайдеров (AWS, GCP, Azure, Alibaba Cloud, Oracle Cloud, DigitalOcean, OpenStack) и well-known-префикс NAT64. IPv4-mapped IPv6-адреса нормализуются перед проверкой.
+
+Дополнительные ограничения: лимит на количество редиректов — 10, лимит на размер тела ответа — 10 МиБ, таймаут по умолчанию — 15 секунд (настраивается). Query-параметры в отчёте по умолчанию редактируются. Сбор телеметрии и аналитики не выполняется.
+
+## Позиционирование
+
+Отличие от `curl`/`wget`: инструмент не просто выполняет запрос, а классифицирует результат, указывает вероятную причину и ответственную сторону, предлагает команды для верификации.
+
+Отличие от онлайн-сканеров (SSL Labs, SecurityHeaders, PageSpeed Insights): выполнение происходит локально, данные не передаются на сторонние серверы, поддерживается диагностика внутренних адресов при использовании флага `--allow-private`.
+
+Отличие от систем мониторинга (Pingdom, UptimeRobot): инструмент предназначен для разовой диагностики по запросу, а не для непрерывного наблюдения; не хранит историю и не выполняет периодических проверок.
+
+Формулировки в отчёте формируются детерминированными правилами на основе измеренных значений, без использования генеративных моделей — что исключает риск некорректных интерпретаций и не требует обращения к внешним API.
+
+## Технические детали реализации
+
+- Go 1.23+, преимущественно стандартная библиотека: `net/http`, `crypto/tls`, `net/netip`, `crypto/x509`, `net/http/httptrace`, `context`, `embed`, `html/template`, `encoding/json`.
+- Внешние зависимости: `cobra` (CLI), `chi` (HTTP-роутер), `miekg/dns` (реализация DoH), `zerolog` (структурированное логирование), `golang.org/x/term` (определение TTY), `golang.org/x/net/idna` (обработка интернационализированных доменов), `go-githubactions` (SDK для GitHub Action), `testify` (используется только в тестах).
+- Защита от SSRF реализована через `netip.Prefix.Contains` без использования сторонних библиотек для работы с CIDR.
+- DoH-запросы реализованы в бинарном wire-формате согласно RFC 8484 (`application/dns-message`), а не через промежуточный JSON API.
+- Проверка TLS выполняется вручную: соединение устанавливается с `InsecureSkipVerify`, после чего отдельно проверяются срок действия, соответствие hostname, цепочка доверия и признак самоподписанности. Такой подход позволяет получить набор конкретных находок вместо единой неинформативной ошибки верификации.
+- HTTP-клиент управляет обработкой редиректов в собственном цикле (с использованием `http.ErrUseLastResponse`), что обеспечивает полный контроль над записью каждого перехода и проверкой безопасности адреса назначения на каждом шаге.
+- Реализован собственный `Dialer`, измеряющий тайминги DNS-резолвинга и установки TCP-соединения самостоятельно, поскольку стандартные хуки `httptrace` не вызываются при переопределении `DialContext`.
+- Все сетевые компоненты (резолвер, dialer, HTTP-транспорт) принимаются в виде интерфейсов через внедрение зависимостей, что позволяет тестировать логику без обращения к реальным сетевым ресурсам.
+
+## Распространение
+
+- GitHub Releases — сборка через `goreleaser`, мультиплатформенные бинарники, SBOM.
+- Docker-образ — `ghcr.io/downorwhy/downorwhy`.
+- Установка через `go install`.
+- GitHub Actions Marketplace — `downorwhy-action`.
+
+## Текущее состояние проекта
+
+Версия v1.0.0 (pre-release). Все 9 проверок реализованы и покрыты тестами, покрытие тестами пакета проверок — 94%. CLI, API-сервер и GitHub Action функциональны и протестированы. Отчёты формировались и проверялись на реальных публичных целях в процессе разработки (`example.com`, `google.com`, `speshu.ai`).
