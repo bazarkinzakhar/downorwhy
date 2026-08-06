@@ -1,0 +1,21 @@
+builds:
+  - main: ./cmd/downorwhy
+    id: downorwhy
+    binary: downorwhy
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: -s -w -X github.com/downorwhy/downorwhy/internal/shared.Version={{.Version}}
+  - main: ./cmd/downorwhy-server
+    id: downorwhy-server
+    binary: downorwhy-server
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

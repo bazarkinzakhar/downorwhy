@@ -161,6 +161,10 @@ func writeOutput(report *types.Report, cfg types.Config) {
 		default:
 			err = renderers.Markdown(w, report)
 		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "downorwhy: cannot write report: %s\n", err)
+			os.Exit(types.ExitInternal)
+		}
 	}
 }
 

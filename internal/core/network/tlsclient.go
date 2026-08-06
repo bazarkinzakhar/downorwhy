@@ -89,7 +89,6 @@ func (c *TLSClient) Observe(ctx context.Context, host, hostPort string) (*TLSObs
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = conn.Close() }()
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -187,30 +186,44 @@ func (c *TLSClient) ProbeLegacyProtocol(ctx context.Context, host, hostPort stri
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = conn.Close() }()
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(c.timeout)
 	}
 	if deadlineErr := conn.SetDeadline(deadline); deadlineErr != nil {
+		_ = conn.Close()
 		return nil
 	}
 
 	tlsConn := tls.Client(conn, &tls.Config{
 		ServerName:         host,
-		InsecureSkipVerify: true, //nolint:gosec // probing accepted protocol versions, not establishing trust
+		InsecureSkipVerify: true, //nolint:gosec
 		MinVersion:         tls.VersionTLS10,
 		MaxVersion:         tls.VersionTLS10,
 	})
 
 	handshakeErr := tlsConn.HandshakeContext(ctx)
-	if handshakeErr != nil && isLocalProtocolRefusal(handshakeErr) {
-		return nil
+	_ = tlsConn.Close()
+
+	if handshakeErr != nil {
+		if isLocalProtocolRefusal(handshakeErr) {
+			return nil
+		}
+		accepted := false
+		return &accepted
 	}
 
-	accepted := handshakeErr == nil
+	// Handshake succeeded at TLS 1.0 — check what was actually negotiated.
+	negotiated := tlsConn.ConnectionState().Version
+	if negotiated > tls.VersionTLS10 {
+		// Server upgraded us despite our MaxVersion cap.
+		// This means the server does NOT truly accept TLS 1.0.
+		accepted := false
+		return &accepted
+	}
 
+	accepted := true
 	return &accepted
 }
 
