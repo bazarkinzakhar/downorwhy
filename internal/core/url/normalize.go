@@ -4,6 +4,7 @@ package url
 
 import (
 	"fmt"
+	"net"
 	neturl "net/url"
 	"sort"
 	"strings"
@@ -22,7 +23,8 @@ const RedactedValue = "REDACTED"
 type Target struct {
 	// URL is the normalised URL used for the actual request.
 	URL *neturl.URL
-	// Host is the ASCII (punycode) host without a port.
+	// Host is the ASCII (punycode) host without a port and without brackets,
+	// even for IPv6 literals.
 	Host string
 	// UnicodeHost is the display form of Host; equal to Host for ASCII names.
 	UnicodeHost string
@@ -37,8 +39,9 @@ type Target struct {
 // String returns the normalised URL as text.
 func (t Target) String() string { return t.URL.String() }
 
-// HostPort returns host:port suitable for net.Dial.
-func (t Target) HostPort() string { return neturl.URL{Host: t.Host + ":" + t.Port}.Host }
+// HostPort returns host:port suitable for net.Dial. IPv6 literals are
+// bracketed as net.Dial requires.
+func (t Target) HostPort() string { return net.JoinHostPort(t.Host, t.Port) }
 
 // IsHTTPS reports whether the target uses TLS.
 func (t Target) IsHTTPS() bool { return t.Scheme == "https" }
@@ -53,8 +56,8 @@ var idnaProfile = idna.New(
 //
 // It trims whitespace, assumes https when no scheme is present, lowercases the
 // scheme and host, converts internationalised host names to punycode, drops
-// the default port, ensures a non-empty path, and removes the fragment (which
-// is never transmitted and may contain sensitive data).
+// the default port, ensures a non-empty path, and removes the fragment, which
+// is never transmitted and may carry sensitive data.
 func Normalize(raw string) (Target, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -109,10 +112,18 @@ func Normalize(raw string) (Target, error) {
 		return Target{}, fmt.Errorf("%w: invalid port %q", types.ErrInvalidURL, port)
 	}
 
-	u.Host = asciiHost
-	if port != defaultPort(u.Scheme) {
-		u.Host = neturl.URL{Host: asciiHost + ":" + port}.Host
+	// Rebuild the authority. IPv6 literals must stay bracketed inside the URL
+	// even when the default port is omitted.
+	if port == defaultPort(u.Scheme) {
+		if strings.Contains(asciiHost, ":") {
+			u.Host = "[" + asciiHost + "]"
+		} else {
+			u.Host = asciiHost
+		}
+	} else {
+		u.Host = net.JoinHostPort(asciiHost, port)
 	}
+
 	if u.Path == "" {
 		u.Path = "/"
 	}
@@ -130,9 +141,9 @@ func Normalize(raw string) (Target, error) {
 }
 
 // Redact returns u as a string with every query parameter value replaced by
-// RedactedValue. Parameter names are preserved because they are diagnostically
-// useful and are not themselves secrets; values frequently carry tokens.
-// Keys are sorted so redacted output is deterministic.
+// RedactedValue. Parameter names are preserved because they are
+// diagnostically useful and are not themselves secrets; values frequently
+// carry tokens. Keys are sorted so redacted output is deterministic.
 func Redact(u *neturl.URL) string {
 	if u == nil {
 		return ""
@@ -140,13 +151,15 @@ func Redact(u *neturl.URL) string {
 	if u.RawQuery == "" {
 		return u.String()
 	}
+
 	clone := *u
 	values, err := neturl.ParseQuery(u.RawQuery)
 	if err != nil {
-		// Unparseable query strings are dropped entirely rather than leaked.
+		// An unparseable query string is dropped entirely rather than leaked.
 		clone.RawQuery = RedactedValue
 		return clone.String()
 	}
+
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -160,6 +173,7 @@ func Redact(u *neturl.URL) string {
 		}
 	}
 	clone.RawQuery = redacted.Encode()
+
 	return clone.String()
 }
 

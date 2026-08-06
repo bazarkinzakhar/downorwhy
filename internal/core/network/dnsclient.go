@@ -1,7 +1,9 @@
 package network
 
 import (
+	"bytes"
 	"context"
+	"sync"
 	"errors"
 	"fmt"
 	"io"
@@ -33,13 +35,18 @@ const (
 	DefaultDoHQuad9      = "https://9.9.9.9/dns-query"
 )
 
-// RCode values reported for the system resolver, which does not expose the
-// real wire-format response code through the standard library. These are
-// inferred from net.DNSError and must not be treated as authoritative; DoH
-// resolvers report the true RCODE decoded from the response message.
-const (
-	RCodeUnknown = "UNKNOWN"
-)
+// RCodeUnknown is reported for system-resolver answers whose true wire-format
+// response code is not exposed by the standard library.
+const RCodeUnknown = "UNKNOWN"
+
+// dohResolverOrder fixes the order in which DoH resolvers are queried and
+// reported. Iterating a Go map would produce a different observation order on
+// every run, which would make reports non-deterministic.
+var dohResolverOrder = []ResolverName{
+	ResolverCloudflare,
+	ResolverGoogle,
+	ResolverQuad9,
+}
 
 // DNSObservation is one resolver's answer for one record type.
 type DNSObservation struct {
@@ -49,9 +56,16 @@ type DNSObservation struct {
 	Answers    []string     `json:"answers"`
 	CNAME      []string     `json:"cname"`
 	RCode      string       `json:"rcode"`
-	Authoritative bool      `json:"rcodeAuthoritative"`
-	DNSSECOK   bool         `json:"dnssecOk"`
-	Err        string       `json:"error,omitempty"`
+	// Authoritative reports whether RCode was decoded from a real DNS
+	// response. It is false for system-resolver answers, where the standard
+	// library hides the wire-format response code.
+	Authoritative bool `json:"rcodeAuthoritative"`
+	// DNSSECValidated reflects the AD (authenticated data) bit, meaning the
+	// resolver cryptographically validated the answer. It is false both for
+	// unsigned zones and for resolvers that do not validate, so it must never
+	// be treated on its own as evidence of a DNSSEC failure.
+	DNSSECValidated bool   `json:"dnssecValidated"`
+	Err             string `json:"error,omitempty"`
 }
 
 // DNSResult aggregates observations from every resolver for a host.
@@ -66,16 +80,15 @@ type Resolver interface {
 	Resolve(ctx context.Context, host string) DNSResult
 }
 
-// systemLookuper is the subset of *net.Resolver used by DNSClient. It is a
-// separate interface so tests can inject a fake system resolver without
-// touching the OS resolver.
+// systemLookuper is the subset of *net.Resolver used by DNSClient, kept
+// separate so tests can inject a fake system resolver.
 type systemLookuper interface {
 	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
 // DNSClient queries the system resolver and a configurable set of DoH
-// resolvers. All dependencies are injected through DNSClientOptions so the
-// client is fully testable without contacting real DNS infrastructure.
+// resolvers. All dependencies are injected so the client is fully testable
+// without contacting real DNS infrastructure.
 type DNSClient struct {
 	httpClient     *http.Client
 	systemResolver systemLookuper
@@ -83,8 +96,7 @@ type DNSClient struct {
 }
 
 // DNSClientOptions configures a DNSClient. Zero-value fields fall back to
-// production defaults: the OS resolver and the public Cloudflare/Google/Quad9
-// DoH endpoints.
+// production defaults: the OS resolver and the public DoH endpoints.
 type DNSClientOptions struct {
 	Timeout        time.Duration
 	HTTPClient     *http.Client
@@ -98,19 +110,21 @@ func NewDNSClient(timeout time.Duration) *DNSClient {
 }
 
 // NewDNSClientWithOptions builds a DNS client from explicit dependencies.
-// Tests use this to inject httptest servers and fake resolvers.
 func NewDNSClientWithOptions(opts DNSClientOptions) *DNSClient {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
 	}
+
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: opts.Timeout}
 	}
-	sysResolver := opts.SystemResolver
-	if sysResolver == nil {
-		sysResolver = net.DefaultResolver
+
+	systemResolver := opts.SystemResolver
+	if systemResolver == nil {
+		systemResolver = net.DefaultResolver
 	}
+
 	endpoints := opts.Endpoints
 	if endpoints == nil {
 		endpoints = map[ResolverName]string{
@@ -119,13 +133,19 @@ func NewDNSClientWithOptions(opts DNSClientOptions) *DNSClient {
 			ResolverQuad9:      DefaultDoHQuad9,
 		}
 	}
-	return &DNSClient{httpClient: httpClient, systemResolver: sysResolver, endpoints: endpoints}
+
+	return &DNSClient{
+		httpClient:     httpClient,
+		systemResolver: systemResolver,
+		endpoints:      endpoints,
+	}
 }
 
 // Resolve queries A and AAAA records for host across the system resolver and
-// every configured DoH resolver, concurrently, sharing ctx's deadline. It
-// never returns an error: per-resolver failures are recorded on the
-// observation so the caller always gets a complete, comparable result set.
+// every configured DoH resolver, concurrently, sharing ctx's deadline.
+// Observations are returned in a fixed order regardless of completion order.
+// Resolve never returns an error: per-resolver failures are recorded on the
+// observation so the caller always receives a comparable result set.
 func (c *DNSClient) Resolve(ctx context.Context, host string) DNSResult {
 	type job struct {
 		resolver ResolverName
@@ -136,21 +156,25 @@ func (c *DNSClient) Resolve(ctx context.Context, host string) DNSResult {
 		{ResolverSystem, dns.TypeA},
 		{ResolverSystem, dns.TypeAAAA},
 	}
-	for name := range c.endpoints {
+	for _, name := range dohResolverOrder {
+		if _, ok := c.endpoints[name]; !ok {
+			continue
+		}
 		jobs = append(jobs, job{name, dns.TypeA}, job{name, dns.TypeAAAA})
 	}
 
 	results := make([]DNSObservation, len(jobs))
-	done := make(chan int, len(jobs))
+
+	var wg sync.WaitGroup
 	for i, j := range jobs {
-		go func(i int, j job) {
-			results[i] = c.query(ctx, j.resolver, host, j.rtype)
-			done <- i
+		wg.Add(1)
+		go func(index int, spec job) {
+			defer wg.Done()
+			results[index] = c.query(ctx, spec.resolver, host, spec.rtype)
 		}(i, j)
 	}
-	for range jobs {
-		<-done
-	}
+	wg.Wait()
+
 	return DNSResult{Host: host, Observations: results}
 }
 
@@ -170,16 +194,17 @@ func (c *DNSClient) query(ctx context.Context, resolver ResolverName, host strin
 		return obs
 	}
 
-	answers, cname, rcode, dnssecOK, err := c.queryDoH(ctx, resolver, host, rtype)
+	answers, cnames, rcode, validated, err := c.queryDoH(ctx, resolver, host, rtype)
 	obs.LatencyMS = time.Since(start).Milliseconds()
 	obs.Answers = answers
-	obs.CNAME = cname
+	obs.CNAME = cnames
 	obs.RCode = dns.RcodeToString[rcode]
 	obs.Authoritative = err == nil
-	obs.DNSSECOK = dnssecOK
+	obs.DNSSECValidated = validated
 	if err != nil {
 		obs.Err = err.Error()
 	}
+
 	return obs
 }
 
@@ -191,30 +216,28 @@ func (c *DNSClient) querySystem(ctx context.Context, host string, rtype uint16) 
 	if rtype == dns.TypeAAAA {
 		network = "ip6"
 	}
+
 	ips, err := c.systemResolver.LookupIP(ctx, network, host)
 	if err != nil {
 		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) {
-			switch {
-			case dnsErr.IsNotFound:
-				return nil, dns.RcodeToString[dns.RcodeNameError], err
-			case dnsErr.IsTimeout:
-				return nil, RCodeUnknown, err
-			}
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return nil, dns.RcodeToString[dns.RcodeNameError], err
 		}
 		return nil, RCodeUnknown, err
 	}
+
 	out := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		out = append(out, ip.String())
 	}
+
 	return out, dns.RcodeToString[dns.RcodeSuccess], nil
 }
 
 // queryDoH sends an RFC 8484 wire-format query over HTTPS POST and decodes
-// the response, including the authoritative RCODE and the DNSSEC OK bit.
+// the response, including the authoritative RCODE and the AD bit.
 func (c *DNSClient) queryDoH(ctx context.Context, resolver ResolverName, host string, rtype uint16) (
-	answers, cnames []string, rcode int, dnssecOK bool, err error,
+	answers, cnames []string, rcode int, dnssecValidated bool, err error,
 ) {
 	endpoint, ok := c.endpoints[resolver]
 	if !ok {
@@ -227,21 +250,21 @@ func (c *DNSClient) queryDoH(ctx context.Context, resolver ResolverName, host st
 	msg.SetEdns0(4096, true)
 	msg.RecursionDesired = true
 
-	packed, perr := msg.Pack()
-	if perr != nil {
-		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("packing dns query: %w", perr)
+	packed, packErr := msg.Pack()
+	if packErr != nil {
+		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("packing dns query: %w", packErr)
 	}
 
-	req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(packed)))
-	if rerr != nil {
-		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("building doh request: %w", rerr)
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(packed))
+	if reqErr != nil {
+		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("building doh request: %w", reqErr)
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
 
-	resp, derr := c.httpClient.Do(req)
-	if derr != nil {
-		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("doh request to %s: %w", resolver, derr)
+	resp, doErr := c.httpClient.Do(req)
+	if doErr != nil {
+		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("doh request to %s: %w", resolver, doErr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -250,14 +273,14 @@ func (c *DNSClient) queryDoH(ctx context.Context, resolver ResolverName, host st
 			fmt.Errorf("doh %s returned http status %d", resolver, resp.StatusCode)
 	}
 
-	body, ierr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if ierr != nil {
-		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("reading doh response body: %w", ierr)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if readErr != nil {
+		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("reading doh response body: %w", readErr)
 	}
 
 	respMsg := new(dns.Msg)
-	if uerr := respMsg.Unpack(body); uerr != nil {
-		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("unpacking doh response: %w", uerr)
+	if unpackErr := respMsg.Unpack(body); unpackErr != nil {
+		return nil, nil, dns.RcodeServerFailure, false, fmt.Errorf("unpacking doh response: %w", unpackErr)
 	}
 
 	for _, rr := range respMsg.Answer {
@@ -270,12 +293,13 @@ func (c *DNSClient) queryDoH(ctx context.Context, resolver ResolverName, host st
 			cnames = append(cnames, strings.TrimSuffix(v.Target, "."))
 		}
 	}
-	if opt := respMsg.IsEdns0(); opt != nil {
-		dnssecOK = opt.Do()
-	}
+
+	dnssecValidated = respMsg.AuthenticatedData
+
 	if respMsg.Rcode != dns.RcodeSuccess {
-		return answers, cnames, respMsg.Rcode, dnssecOK,
+		return answers, cnames, respMsg.Rcode, dnssecValidated,
 			fmt.Errorf("doh %s returned rcode %s", resolver, dns.RcodeToString[respMsg.Rcode])
 	}
-	return answers, cnames, respMsg.Rcode, dnssecOK, nil
+
+	return answers, cnames, respMsg.Rcode, dnssecValidated, nil
 }

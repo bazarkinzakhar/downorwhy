@@ -29,7 +29,7 @@ func obs(resolver network.ResolverName, rtype string, answers []string, latencyM
 		Answers:       answers,
 		LatencyMS:     latencyMS,
 		Authoritative: authoritative,
-		DNSSECOK:      dnssecOK,
+		DNSSECValidated: dnssecOK,
 		Err:           errMsg,
 		RCode:         "NOERROR",
 	}
@@ -131,25 +131,4 @@ func TestRunDNSDisagreementIsWarning(t *testing.T) {
 		}
 	}
 	require.True(t, sawDisagreement)
-}
-
-func TestRunDNSMissingDNSSECIsInfoOnly(t *testing.T) {
-	resolver := fakeResolver{result: network.DNSResult{
-		Observations: []network.DNSObservation{
-			obs(network.ResolverSystem, "A", []string{"1.1.1.1"}, 20, false, false, ""),
-			obs(network.ResolverCloudflare, "A", []string{"1.1.1.1"}, 30, true, false, ""),
-		},
-	}}
-
-	result := checks.RunDNS(context.Background(), "unsigned.example.com", resolver)
-	require.Equal(t, types.CheckStatusPass, result.Status, "DNSSEC info finding must not fail the check")
-
-	var sawInfo bool
-	for _, f := range result.Findings {
-		if f.Title == "DNSSEC validation not confirmed" {
-			sawInfo = true
-			require.Equal(t, types.SeverityInfo, f.Severity)
-		}
-	}
-	require.True(t, sawInfo)
 }

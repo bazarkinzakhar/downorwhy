@@ -1,11 +1,10 @@
-// Package checks contains one file per DownOrWhy check. Every check exposes a
-// Run-style function with a signature tailored to the data it needs; the
-// scanner package wires these together. See docs/architecture.md.
 package checks
 
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/downorwhy/downorwhy/internal/core/network"
@@ -15,17 +14,9 @@ import (
 // DNSSlowThreshold flags a resolver as slow above this latency.
 const DNSSlowThreshold = 500 * time.Millisecond
 
-// resolverRecordKey groups observations by resolver and record type so
-// answer sets can be compared for cross-resolver disagreement.
-type resolverRecordKey struct {
-	Resolver   string
-	RecordType string
-}
-
 // RunDNS resolves host through resolver and evaluates the answers for
-// outages, resolver disagreement, latency and DNSSEC posture. resolver is an
-// interface so production code injects network.DNSClient and tests inject a
-// deterministic fake.
+// outages, cross-resolver disagreement and latency. resolver is an interface
+// so production code injects network.DNSClient and tests inject a fake.
 func RunDNS(ctx context.Context, host string, resolver network.Resolver) types.CheckResult {
 	start := time.Now()
 	result := types.NewCheckResult(types.CheckDNS)
@@ -33,138 +24,206 @@ func RunDNS(ctx context.Context, host string, resolver network.Resolver) types.C
 
 	dnsResult := resolver.Resolve(ctx, host)
 
-	answersByKey := map[resolverRecordKey][]string{}
-	anyAnswer := false
-	var slowResolvers []string
-	var failedResolvers []string
-	var dnssecFailures []string
+	var (
+		anyAnswer       bool
+		slowQueries     []string
+		failedQueries   []string
+		validatedByAny  bool
+		ipv4Present     bool
+		ipv6Present     bool
+		answersByRecord = map[string]map[string][]string{}
+	)
 
 	for _, obs := range dnsResult.Observations {
-		key := resolverRecordKey{Resolver: string(obs.Resolver), RecordType: obs.RecordType}
 		if len(obs.Answers) > 0 {
 			anyAnswer = true
-			answersByKey[key] = append(answersByKey[key], obs.Answers...)
+
+			if answersByRecord[obs.RecordType] == nil {
+				answersByRecord[obs.RecordType] = map[string][]string{}
+			}
+			answersByRecord[obs.RecordType][string(obs.Resolver)] = normalizedAnswers(obs.Answers)
+
+			switch obs.RecordType {
+			case "A":
+				ipv4Present = true
+			case "AAAA":
+				ipv6Present = true
+			}
 		}
+
 		if obs.Err != "" {
-			failedResolvers = append(failedResolvers, fmt.Sprintf("%s/%s: %s", obs.Resolver, obs.RecordType, obs.Err))
+			failedQueries = append(failedQueries, fmt.Sprintf("%s/%s: %s", obs.Resolver, obs.RecordType, obs.Err))
 		}
+
 		if time.Duration(obs.LatencyMS)*time.Millisecond > DNSSlowThreshold {
-			slowResolvers = append(slowResolvers, fmt.Sprintf("%s/%s (%dms)", obs.Resolver, obs.RecordType, obs.LatencyMS))
+			slowQueries = append(slowQueries, fmt.Sprintf("%s/%s (%dms)", obs.Resolver, obs.RecordType, obs.LatencyMS))
 		}
-		if obs.Authoritative && !obs.DNSSECOK && len(obs.Answers) > 0 {
-			dnssecFailures = append(dnssecFailures, fmt.Sprintf("%s/%s", obs.Resolver, obs.RecordType))
+
+		if obs.DNSSECValidated {
+			validatedByAny = true
 		}
 	}
 
 	result.Set("host", host)
 	result.Set("observations", dnsResult.Observations)
+	result.Set("hasIPv4", ipv4Present)
+	result.Set("hasIPv6", ipv6Present)
+	result.Set("dnssecValidatedByAnyResolver", validatedByAny)
 
 	if !anyAnswer {
 		result.AddFinding(types.Finding{
 			Severity: types.SeverityCritical,
 			Layer:    types.LayerDNS,
 			Title:    "Domain does not resolve",
-			Description: "No resolver returned an A or AAAA record for this host. The domain " +
-				"either has no DNS records, does not exist, or every queried resolver failed independently.",
-			Evidence: map[string]interface{}{"observations": dnsResult.Observations},
-			Owner:    types.OwnerDNSProvider,
+			Description: "No resolver returned an A or AAAA record for this host. The domain either " +
+				"has no DNS records, does not exist, or every queried resolver failed independently. " +
+				"Nothing else about the site can be reached until this is fixed.",
+			Evidence: map[string]interface{}{
+				"observations": dnsResult.Observations,
+			},
+			Owner: types.OwnerDNSProvider,
 		})
+
 		result.Status = types.CheckStatusFail
 		result.Summary = "no resolver returned an address for " + host
 		result.DurationMS = time.Since(start).Milliseconds()
+
 		return result
 	}
 
-	if len(failedResolvers) > 0 {
+	if len(failedQueries) > 0 {
 		result.AddFinding(types.Finding{
 			Severity: types.SeverityWarning,
 			Layer:    types.LayerDNS,
 			Title:    "One or more DNS resolvers failed",
 			Description: "At least one resolver returned an error while others succeeded. This can " +
 				"indicate resolver-specific blocking, propagation lag, or an intermittent authoritative " +
-				"nameserver issue.",
-			Evidence: map[string]interface{}{"failedQueries": failedResolvers},
-			Owner:    types.OwnerDNSProvider,
+				"nameserver. Users of the affected resolver may not reach the site.",
+			Evidence: map[string]interface{}{
+				"failedQueries": failedQueries,
+			},
+			Owner: types.OwnerDNSProvider,
 		})
 	}
 
-	if len(slowResolvers) > 0 {
+	if len(slowQueries) > 0 {
 		result.AddFinding(types.Finding{
 			Severity: types.SeverityWarning,
 			Layer:    types.LayerDNS,
 			Title:    "Slow DNS resolution",
 			Description: fmt.Sprintf("DNS lookups took longer than %s. Slow DNS delays every "+
-				"subsequent connection to this site, including the first byte of every page load.", DNSSlowThreshold),
-			Evidence: map[string]interface{}{"slowQueries": slowResolvers},
-			Owner:    types.OwnerDNSProvider,
+				"connection to this site, including the first byte of every page load.", DNSSlowThreshold),
+			Evidence: map[string]interface{}{
+				"slowQueries": slowQueries,
+			},
+			Owner: types.OwnerDNSProvider,
 		})
 	}
 
-	if f := detectDisagreement(answersByKey); f != nil {
-		result.AddFinding(*f)
+	for _, recordType := range sortedKeys(answersByRecord) {
+		if finding := disagreementFinding(recordType, answersByRecord[recordType]); finding != nil {
+			result.AddFinding(*finding)
+		}
 	}
 
-	if len(dnssecFailures) > 0 {
-		result.AddFinding(types.Finding{
-			Severity: types.SeverityInfo,
-			Layer:    types.LayerDNS,
-			Title:    "DNSSEC validation not confirmed",
-			Description: "One or more resolvers returned an answer without the DNSSEC OK bit set on " +
-				"the response, meaning validation could not be confirmed for this query. This is expected " +
-				"for zones that do not sign their records and is informational only.",
-			Evidence: map[string]interface{}{"queries": dnssecFailures},
-			Owner:    types.OwnerDNSProvider,
-		})
-	}
-
-	result.Summary = fmt.Sprintf("resolved %s via %d/%d resolver queries", host,
-		countSuccessful(dnsResult.Observations), len(dnsResult.Observations))
+	result.Summary = fmt.Sprintf(
+		"resolved %s: %d of %d resolver queries returned records",
+		host,
+		countSuccessful(dnsResult.Observations),
+		len(dnsResult.Observations),
+	)
 	result.DurationMS = time.Since(start).Milliseconds()
+
 	return result
 }
 
-func detectDisagreement(answersByKey map[resolverRecordKey][]string) *types.Finding {
-	perType := map[string]map[string]struct{}{}
-	perTypeResolvers := map[string]map[string][]string{}
-
-	for key, answers := range answersByKey {
-		set := perType[key.RecordType]
-		if set == nil {
-			set = map[string]struct{}{}
-			perType[key.RecordType] = set
-		}
-		if perTypeResolvers[key.RecordType] == nil {
-			perTypeResolvers[key.RecordType] = map[string][]string{}
-		}
-		for _, a := range answers {
-			set[a] = struct{}{}
-		}
-		perTypeResolvers[key.RecordType][key.Resolver] = answers
+// disagreementFinding reports a finding when two resolvers returned different
+// answer sets for the same record type. Order and duplicates are ignored: two
+// resolvers returning the same two addresses in a different order agree.
+func disagreementFinding(recordType string, byResolver map[string][]string) *types.Finding {
+	if len(byResolver) < 2 {
+		return nil
 	}
 
-	for rtype, set := range perType {
-		if len(set) > 1 {
+	var reference string
+	var referenceResolver string
+
+	for _, resolverName := range sortedStringKeys(byResolver) {
+		fingerprint := strings.Join(byResolver[resolverName], ",")
+
+		if referenceResolver == "" {
+			reference = fingerprint
+			referenceResolver = resolverName
+			continue
+		}
+
+		if fingerprint != reference {
+			evidence := make(map[string]interface{}, len(byResolver))
+			for name, answers := range byResolver {
+				evidence[name] = answers
+			}
+
 			return &types.Finding{
 				Severity: types.SeverityWarning,
 				Layer:    types.LayerDNS,
-				Title:    fmt.Sprintf("Resolvers disagree on %s records", rtype),
+				Title:    fmt.Sprintf("Resolvers disagree on %s records", recordType),
 				Description: "Different DNS resolvers returned different answers for the same query. " +
-					"This is expected briefly during a DNS change, but persisting disagreement can indicate " +
-					"stale caching, split-horizon misconfiguration, or a propagation issue.",
-				Evidence: map[string]interface{}{"answersByResolver": perTypeResolvers[rtype]},
-				Owner:    types.OwnerDNSProvider,
+					"This is expected briefly during a DNS change, but persistent disagreement points to " +
+					"stale caching, split-horizon configuration, or an incomplete propagation. Some users " +
+					"will reach a different server than others.",
+				Evidence: map[string]interface{}{
+					"answersByResolver": evidence,
+				},
+				Owner: types.OwnerDNSProvider,
 			}
 		}
 	}
+
 	return nil
 }
 
-func countSuccessful(obs []network.DNSObservation) int {
+func normalizedAnswers(answers []string) []string {
+	unique := make(map[string]struct{}, len(answers))
+	for _, a := range answers {
+		unique[strings.ToLower(strings.TrimSpace(a))] = struct{}{}
+	}
+
+	out := make([]string, 0, len(unique))
+	for a := range unique {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+func sortedKeys(m map[string]map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+func sortedStringKeys(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+func countSuccessful(observations []network.DNSObservation) int {
 	n := 0
-	for _, o := range obs {
-		if o.Err == "" && len(o.Answers) > 0 {
+	for _, obs := range observations {
+		if obs.Err == "" && len(obs.Answers) > 0 {
 			n++
 		}
 	}
+
 	return n
 }
