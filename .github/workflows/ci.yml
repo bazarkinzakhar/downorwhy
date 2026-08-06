@@ -19,9 +19,8 @@ jobs:
       - run: go mod download
       - run: go vet ./...
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.6
+      - name: Run golangci-lint
+        run: go run ://github.com run ./...
 
       - run: go test ./... -race -cover
       - run: go build ./...
