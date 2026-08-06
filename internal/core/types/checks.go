@@ -1,6 +1,5 @@
 package types
 
-// Check status values.
 const (
 	CheckStatusPass    = "pass"
 	CheckStatusWarn    = "warn"
@@ -9,7 +8,6 @@ const (
 	CheckStatusError   = "error"
 )
 
-// Check identifiers, used as map keys, CLI filters and documentation anchors.
 const (
 	CheckDNS         = "dns"
 	CheckTLS         = "tls"
@@ -19,10 +17,9 @@ const (
 	CheckCDNCache    = "cdnCache"
 	CheckPerformance = "performance"
 	CheckSecurity    = "security"
+	CheckIPv46       = "ipv46"
 )
 
-// CheckResult is the output of a single check package. Details carries the
-// check-specific payload documented in docs/report-schema.md.
 type CheckResult struct {
 	Name       string                 `json:"name"`
 	Status     string                 `json:"status"`
@@ -33,7 +30,6 @@ type CheckResult struct {
 	Error      string                 `json:"error,omitempty"`
 }
 
-// Checks aggregates every check result of a scan.
 type Checks struct {
 	DNS         CheckResult `json:"dns"`
 	TLS         CheckResult `json:"tls"`
@@ -43,10 +39,9 @@ type Checks struct {
 	CDNCache    CheckResult `json:"cdnCache"`
 	Performance CheckResult `json:"performance"`
 	Security    CheckResult `json:"security"`
+	IPv46       CheckResult `json:"ipv46"`
 }
 
-// NewCheckResult returns a skipped result for the named check with
-// initialised containers.
 func NewCheckResult(name string) CheckResult {
 	return CheckResult{
 		Name:     name,
@@ -57,7 +52,6 @@ func NewCheckResult(name string) CheckResult {
 	}
 }
 
-// NewChecks returns a Checks value where every check is marked as skipped.
 func NewChecks() Checks {
 	return Checks{
 		DNS:         NewCheckResult(CheckDNS),
@@ -68,19 +62,17 @@ func NewChecks() Checks {
 		CDNCache:    NewCheckResult(CheckCDNCache),
 		Performance: NewCheckResult(CheckPerformance),
 		Security:    NewCheckResult(CheckSecurity),
+		IPv46:       NewCheckResult(CheckIPv46),
 	}
 }
 
-// All returns the checks in report order. The slice is a copy; mutating it
-// does not affect the receiver.
 func (c Checks) All() []CheckResult {
 	return []CheckResult{
 		c.DNS, c.TLS, c.HTTP, c.Redirects,
-		c.Headers, c.CDNCache, c.Performance, c.Security,
+		c.Headers, c.CDNCache, c.Performance, c.Security, c.IPv46,
 	}
 }
 
-// AddFinding appends f to the result and raises its status if needed.
 func (r *CheckResult) AddFinding(f Finding) {
 	r.Findings = append(r.Findings, f)
 	switch f.Severity {
@@ -93,7 +85,6 @@ func (r *CheckResult) AddFinding(f Finding) {
 	}
 }
 
-// Set records a detail value for the check.
 func (r *CheckResult) Set(key string, value interface{}) {
 	if r.Details == nil {
 		r.Details = map[string]interface{}{}

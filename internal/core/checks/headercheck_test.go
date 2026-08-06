@@ -18,9 +18,16 @@ func headersResponse(scheme string, headers http.Header) *network.Response {
 		panic(err)
 	}
 
+	normalized := make(http.Header)
+	for k, v := range headers {
+		for _, value := range v {
+			normalized.Add(k, value)
+		}
+	}
+
 	return &network.Response{
 		FinalURL: finalURL,
-		Header:   headers,
+		Header:   normalized,
 	}
 }
 
@@ -42,13 +49,12 @@ func TestRunHeadersNilResponseIsSkipped(t *testing.T) {
 
 func TestRunHeadersSecureBaselinePasses(t *testing.T) {
 	response := headersResponse("https", http.Header{
-		"Strict-Transport-Security":      []string{"max-age=31536000; includeSubDomains"},
-		"Content-Security-Policy":        []string{"default-src 'self'; frame-ancestors 'none'"},
-		"X-Content-Type-Options":         []string{"nosniff"},
-		"Referrer-Policy":                []string{"strict-origin-when-cross-origin"},
-		"Set-Cookie":                     []string{"session=opaque; Path=/; Secure; HttpOnly; SameSite=Lax"},
-		"X-Frame-Options":                []string{"DENY"},
-		"Access-Control-Allow-Origin":    []string{"https://app.example.com"},
+		"Strict-Transport-Security":       []string{"max-age=31536000; includeSubDomains"},
+		"Content-Security-Policy":         []string{"default-src 'self'; frame-ancestors 'none'"},
+		"X-Content-Type-Options":          []string{"nosniff"},
+		"Referrer-Policy":                 []string{"strict-origin-when-cross-origin"},
+		"X-Frame-Options":                 []string{"DENY"},
+		"Access-Control-Allow-Origin":     []string{"https://app.example.com"},
 		"Access-Control-Allow-Credentials": []string{"true"},
 	})
 

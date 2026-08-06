@@ -17,8 +17,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	dowurl "github.com/downorwhy/downorwhy/internal/core/url"
 	"github.com/downorwhy/downorwhy/internal/core/network"
+	dowurl "github.com/downorwhy/downorwhy/internal/core/url"
 	"github.com/downorwhy/downorwhy/internal/core/types"
 )
 
@@ -32,8 +32,6 @@ type certOpts struct {
 	parentKey  *ecdsa.PrivateKey
 }
 
-// generateCertificate builds a self-signed or CA-signed certificate for
-// tests. It never touches disk or the network.
 func generateCertificate(t *testing.T, opts certOpts) ([][]byte, *ecdsa.PrivateKey, *x509.Certificate) {
 	t.Helper()
 
@@ -77,7 +75,12 @@ func generateCertificate(t *testing.T, opts certOpts) ([][]byte, *ecdsa.PrivateK
 	return [][]byte{der}, key, cert
 }
 
-func startTLSTestServer(t *testing.T, certChain [][]byte, key *ecdsa.PrivateKey, minVersion uint16) *httptest.Server {
+func startTLSTestServer(
+	t *testing.T,
+	certChain [][]byte,
+	key *ecdsa.PrivateKey,
+	minVersion uint16,
+) *httptest.Server {
 	t.Helper()
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -109,18 +112,20 @@ func testDialer(t *testing.T) *network.SafeDialer {
 
 func TestTLSClientObserveValidCAChain(t *testing.T) {
 	now := time.Now()
-	caChain, caKey, caCert := generateCertificate(t, certOpts{
+	_, caKey, caCert := generateCertificate(t, certOpts{
 		commonName: "Test CA",
+		dnsNames:   nil,
 		notBefore:  now.Add(-time.Hour),
-		notAfter:   now.Add(24 * time.Hour),
+		notAfter:   now.Add(48 * time.Hour),
 		isCA:       true,
 	})
-	_ = caChain
+
 	leafChain, leafKey, _ := generateCertificate(t, certOpts{
 		commonName: "testhost",
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-time.Hour),
-		notAfter:   now.Add(24 * time.Hour),
+		notAfter:   now.Add(48 * time.Hour),
+		isCA:       false,
 		parent:     caCert,
 		parentKey:  caKey,
 	})
@@ -131,7 +136,9 @@ func TestTLSClientObserveValidCAChain(t *testing.T) {
 	roots.AddCert(caCert)
 
 	client := network.NewTLSClient(network.TLSClientOptions{
-		Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: roots,
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   roots,
 	})
 
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
@@ -151,17 +158,24 @@ func TestTLSClientObserveSelfSignedTrustedAsOwnRoot(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-time.Hour),
 		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	roots := x509.NewCertPool()
 	roots.AddCert(cert)
 
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: roots})
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   roots,
+	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)
 	require.True(t, obs.SelfSigned)
-	require.True(t, obs.ChainVerified, "a self-signed cert explicitly trusted as a root must verify")
+	require.True(t, obs.ChainVerified, obs.ChainVerifyError)
 }
 
 func TestTLSClientObserveSelfSignedUntrusted(t *testing.T) {
@@ -171,12 +185,17 @@ func TestTLSClientObserveSelfSignedUntrusted(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-time.Hour),
 		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	client := network.NewTLSClient(network.TLSClientOptions{
-		Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: x509.NewCertPool(), // deliberately empty, not nil
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   x509.NewCertPool(),
 	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)
 	require.True(t, obs.SelfSigned)
@@ -191,12 +210,17 @@ func TestTLSClientObserveExpiredCertificate(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-48 * time.Hour),
 		notAfter:   now.Add(-24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	client := network.NewTLSClient(network.TLSClientOptions{
-		Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: x509.NewCertPool(),
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   x509.NewCertPool(),
 	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)
 	require.True(t, obs.Expired)
@@ -211,12 +235,17 @@ func TestTLSClientObserveNotYetValidCertificate(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(48 * time.Hour),
 		notAfter:   now.Add(72 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	client := network.NewTLSClient(network.TLSClientOptions{
-		Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: x509.NewCertPool(),
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   x509.NewCertPool(),
 	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)
 	require.True(t, obs.NotYetValid)
@@ -229,18 +258,25 @@ func TestTLSClientObserveHostnameMismatch(t *testing.T) {
 		dnsNames:   []string{"other.example"},
 		notBefore:  now.Add(-time.Hour),
 		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	roots := x509.NewCertPool()
 	roots.AddCert(cert)
 
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: roots})
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   roots,
+	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)
 	require.False(t, obs.HostnameMatches)
 	require.NotEmpty(t, obs.HostnameError)
-	require.True(t, obs.ChainVerified, "hostname mismatch and chain trust are independent")
+	require.True(t, obs.ChainVerified, obs.ChainVerifyError)
 }
 
 func TestTLSClientObserveHandshakeFailureAgainstPlaintextServer(t *testing.T) {
@@ -249,9 +285,13 @@ func TestTLSClientObserveHandshakeFailureAgainstPlaintextServer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: testDialer(t), Timeout: 5 * time.Second})
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+	})
+
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
-	require.NoError(t, err, "a completed TCP connection with a failed handshake is not a network error")
+	require.NoError(t, err)
 	require.False(t, obs.Negotiated)
 	require.NotEmpty(t, obs.HandshakeError)
 }
@@ -263,11 +303,16 @@ func TestTLSClientObserveDialRejectedForUnsafeTarget(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-time.Hour),
 		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS12)
 
 	unsafeDialer := network.NewSafeDialer(dowurl.DefaultPolicy(), nil, 5*time.Second)
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: unsafeDialer, Timeout: 5 * time.Second})
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  unsafeDialer,
+		Timeout: 5 * time.Second,
+	})
 
 	_, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.Error(t, err)
@@ -281,33 +326,53 @@ func TestTLSClientProbeLegacyProtocolRejectedByServer(t *testing.T) {
 		dnsNames:   []string{"testhost"},
 		notBefore:  now.Add(-time.Hour),
 		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	srv := startTLSTestServer(t, chain, key, tls.VersionTLS13)
 
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: testDialer(t), Timeout: 5 * time.Second})
-	result := client.ProbeLegacyProtocol(context.Background(), "testhost", hostPortOf(srv))
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+	})
 
+	result := client.ProbeLegacyProtocol(context.Background(), "testhost", hostPortOf(srv))
 	if result == nil {
-		t.Skip("local Go runtime does not support negotiating TLS 1.0 client-side; probe correctly reported unknown")
+		t.Skip("local Go runtime does not support negotiating TLS 1.0 client-side")
 	}
-	require.False(t, *result, "server configured with MinVersion TLS 1.3 must reject a TLS 1.0 offer")
+	require.False(t, *result)
 }
 
 func TestTLSClientObserveMultipleCertificatesReported(t *testing.T) {
 	now := time.Now()
 	_, caKey, caCert := generateCertificate(t, certOpts{
-		commonName: "Test CA", notBefore: now.Add(-time.Hour), notAfter: now.Add(24 * time.Hour), isCA: true,
+		commonName: "Test CA",
+		dnsNames:   nil,
+		notBefore:  now.Add(-time.Hour),
+		notAfter:   now.Add(24 * time.Hour),
+		isCA:       true,
 	})
+
 	leafChain, leafKey, _ := generateCertificate(t, certOpts{
-		commonName: "testhost", dnsNames: []string{"testhost"},
-		notBefore: now.Add(-time.Hour), notAfter: now.Add(24 * time.Hour),
-		parent: caCert, parentKey: caKey,
+		commonName: "testhost",
+		dnsNames:   []string{"testhost"},
+		notBefore:  now.Add(-time.Hour),
+		notAfter:   now.Add(24 * time.Hour),
+		isCA:       false,
+		parent:     caCert,
+		parentKey:  caKey,
 	})
+
 	srv := startTLSTestServer(t, leafChain, leafKey, tls.VersionTLS12)
 
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
-	client := network.NewTLSClient(network.TLSClientOptions{Dialer: testDialer(t), Timeout: 5 * time.Second, Roots: roots})
+
+	client := network.NewTLSClient(network.TLSClientOptions{
+		Dialer:  testDialer(t),
+		Timeout: 5 * time.Second,
+		Roots:   roots,
+	})
 
 	obs, err := client.Observe(context.Background(), "testhost", hostPortOf(srv))
 	require.NoError(t, err)

@@ -18,12 +18,19 @@ func cdnResponse(headers http.Header) *network.Response {
 		panic(err)
 	}
 
+	normalized := make(http.Header)
+	for k, v := range headers {
+		for _, value := range v {
+			normalized.Add(k, value)
+		}
+	}
+
 	return &network.Response{
 		FinalURL:   finalURL,
 		StatusCode: http.StatusOK,
 		Status:     "200 OK",
 		Proto:      "HTTP/2.0",
-		Header:     headers,
+		Header:     normalized,
 	}
 }
 

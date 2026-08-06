@@ -33,6 +33,7 @@ func RunCDNCache(response *network.Response) types.CheckResult {
 	xCache := strings.TrimSpace(headers.Get("X-Cache"))
 	cfCacheStatus := strings.TrimSpace(headers.Get("CF-Cache-Status"))
 
+
 	result.Set("cacheControl", cacheControl)
 	result.Set("ageHeader", age)
 	result.Set("hasETag", etag != "")

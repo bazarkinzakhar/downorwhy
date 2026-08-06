@@ -192,7 +192,7 @@ func checkCookies(result *types.CheckResult, headers http.Header) {
 			})
 		}
 
-		if cookie.SameSite == http.SameSiteDefaultMode {
+		if cookie.SameSite == http.SameSiteDefaultMode || cookie.SameSite == 0 {
 			result.AddFinding(types.Finding{
 				Severity: types.SeverityInfo,
 				Layer:    types.LayerSecurity,

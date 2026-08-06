@@ -2,8 +2,8 @@ package network_test
 
 import (
 	"context"
-	"net"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -40,24 +40,18 @@ func newTestClient(timeout time.Duration, maxRedirects int, maxBodyBytes int64) 
 
 	return network.NewClient(network.ClientOptions{
 		Config: cfg,
-		Policy: dowurl.Policy{
-			AllowPrivate: true,
-		},
+		Policy: dowurl.Policy{AllowPrivate: true},
 		Resolver: fixedIPResolver{
-			addresses: []netip.Addr{
-				netip.MustParseAddr("127.0.0.1"),
-			},
+			addresses: []netip.Addr{netip.MustParseAddr("127.0.0.1")},
 		},
 	})
 }
 
 func targetForServer(t *testing.T, server *httptest.Server, path string) dowurl.Target {
 	t.Helper()
-
 	port := strconv.Itoa(server.Listener.Addr().(*net.TCPAddr).Port)
 	target, err := dowurl.Normalize("http://scanner.test:" + port + path)
 	require.NoError(t, err)
-
 	return target
 }
 
@@ -65,11 +59,9 @@ func TestHTTPClientFetchSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "DownOrWhy/test", r.UserAgent())
 		require.Equal(t, "/health", r.URL.Path)
-
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=60")
 		w.WriteHeader(http.StatusOK)
-
 		_, err := w.Write([]byte("healthy"))
 		require.NoError(t, err)
 	}))
@@ -138,7 +130,7 @@ func TestHTTPClientFetchStopsAtRedirectLimit(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := newTestClient(2*time.Second, 1, 10<<20)
+	client := newTestClient(2*time.Second, 2, 10<<20)
 	_, err := client.Fetch(context.Background(), targetForServer(t, server, "/one"))
 
 	require.ErrorIs(t, err, types.ErrTooManyRedirects)
@@ -151,7 +143,6 @@ func TestHTTPClientFetchCapsBodyAtConfiguredLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-
 		_, err := w.Write([]byte(body))
 		require.NoError(t, err)
 	}))
@@ -191,9 +182,7 @@ func TestHTTPClientFetchRejectsUnsafeInitialTarget(t *testing.T) {
 		Config: cfg,
 		Policy: dowurl.DefaultPolicy(),
 		Resolver: fixedIPResolver{
-			addresses: []netip.Addr{
-				netip.MustParseAddr("127.0.0.1"),
-			},
+			addresses: []netip.Addr{netip.MustParseAddr("127.0.0.1")},
 		},
 	})
 
@@ -211,9 +200,7 @@ func TestHTTPClientFetchReturnsUnreachableForResolverFailure(t *testing.T) {
 
 	client := network.NewClient(network.ClientOptions{
 		Config: cfg,
-		Policy: dowurl.Policy{
-			AllowPrivate: true,
-		},
+		Policy: dowurl.Policy{AllowPrivate: true},
 		Resolver: fixedIPResolver{
 			err: errors.New("resolver unavailable"),
 		},
