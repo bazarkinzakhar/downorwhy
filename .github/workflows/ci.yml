@@ -19,10 +19,7 @@ jobs:
       - run: go mod download
       - run: go vet ./...
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.5
-          skip-pkg-cache: true
+      - run: go run ://github.com run ./...
 
       - run: go test ./... -race -cover
       - run: go build ./...
