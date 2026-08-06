@@ -19,8 +19,11 @@ jobs:
       - run: go mod download
       - run: go vet ./...
 
-      - name: Run golangci-lint
-        run: go run ://github.com run ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+        env:
+          GOLANGCI_LINT_ALLOW_NEWER_GO: "1"
 
       - run: go test ./... -race -cover
       - run: go build ./...
