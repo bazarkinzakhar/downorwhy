@@ -19,11 +19,10 @@ jobs:
       - run: go mod download
       - run: go vet ./...
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-        env:
-          GOLANGCI_LINT_ALLOW_NEWER_GO: "1"
+      - name: Run golangci-lint
+        run: |
+          curl -sSfL https://githubusercontent.com | sh -s -- -b $(go env GOPATH)/bin v1.64.6
+          $(go env GOPATH)/bin/golangci-lint run ./...
 
       - run: go test ./... -race -cover
       - run: go build ./...
