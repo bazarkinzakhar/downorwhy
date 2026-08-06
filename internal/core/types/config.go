@@ -30,6 +30,8 @@ type Config struct {
 	FailOn       string
 	Redact       bool
 	Verbose      bool
+	// Short enables compact single-line-per-finding output.
+	Short bool
 	UserAgent    string
 	// AllowPrivateTargets disables the SSRF blocklist. It exists only for
 	// operators scanning their own internal hosts and is never enabled by
@@ -50,6 +52,7 @@ func DefaultConfig() Config {
 		FailOn:              FailOnCritical,
 		Redact:              true,
 		Verbose:             false,
+		Short:               false,
 		UserAgent:           "DownOrWhy/dev (+https://github.com/downorwhy/downorwhy)",
 		AllowPrivateTargets: false,
 	}

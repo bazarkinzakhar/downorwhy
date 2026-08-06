@@ -1,0 +1,8 @@
+services:
+  server:
+    build: .
+    entrypoint: ["/downorwhy-server"]
+    ports:
+      - "8787:8787"
+    environment:
+      - VERBOSE=0

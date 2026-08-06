@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -37,6 +35,7 @@ var (
 	timeoutFlag int
 	redactFlag  *bool
 	verboseFlag bool
+	shortFlag  bool
 	servePort   int
 )
 
@@ -70,6 +69,8 @@ func init() {
 		"Disable query parameter redaction")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,
 		"Enable debug logging to stderr")
+	rootCmd.PersistentFlags().BoolVarP(&shortFlag, "short", "s", false,
+		"Compact output: one line per finding, no descriptions")
 
 	rootCmd.AddCommand(scanCmd)
 	rootCmd.AddCommand(serveCmd)
@@ -81,6 +82,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := types.DefaultConfig()
+	cfg.Short = shortFlag
 	cfg.Verbose = verboseFlag
 
 	// Redaction: default is true. --no-redact sets it to false.
@@ -146,20 +148,19 @@ func writeOutput(report *types.Report, cfg types.Config) {
 	}
 
 	var err error
-	switch cfg.Format {
-	case types.FormatJSON:
-		err = renderers.JSON(w, report)
-	case types.FormatHTML:
-		err = renderers.HTML(w, report)
-	case types.FormatText:
-		err = renderers.Text(w, report)
-	default:
-		err = renderers.Markdown(w, report)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "downorwhy: cannot write report: %s\n", err)
-		os.Exit(types.ExitInternal)
+	if cfg.Short {
+		err = renderers.Short(w, report)
+	} else {
+		switch cfg.Format {
+		case types.FormatJSON:
+			err = renderers.JSON(w, report)
+		case types.FormatHTML:
+			err = renderers.HTML(w, report)
+		case types.FormatText:
+			err = renderers.Text(w, report)
+		default:
+			err = renderers.Markdown(w, report)
+		}
 	}
 }
 

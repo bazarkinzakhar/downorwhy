@@ -1,0 +1,27 @@
+name: DownOrWhy
+description: Explain why a site is down, slow, blocked or misconfigured
+inputs:
+  url:
+    description: The public URL to scan
+    required: true
+  format:
+    description: Report format (json, markdown, html, text)
+    required: false
+    default: markdown
+  fail-on:
+    description: Exit code threshold (never, critical, warning)
+    required: false
+    default: critical
+  output:
+    description: Path to write the report file
+    required: false
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ inputs.url }}
+  env:
+    INPUT_URL: ${{ inputs.url }}
+    INPUT_FORMAT: ${{ inputs.format }}
+    INPUT_FAIL-ON: ${{ inputs.fail-on }}
+    INPUT_OUTPUT: ${{ inputs.output }}
