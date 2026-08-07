@@ -163,6 +163,5 @@ GET  /healthz                                  →  {"status": "ok"}
 - Установка через `go install`.
 - GitHub Actions Marketplace — `downorwhy-action`.
 
-## Текущее состояние проекта
-
-Версия v1.0.0 (pre-release). Все 9 проверок реализованы и покрыты тестами, покрытие тестами пакета проверок — 94%. CLI, API-сервер и GitHub Action функциональны и протестированы. Отчёты формировались и проверялись на реальных публичных целях в процессе разработки (`example.com`, `google.com`, `speshu.ai`).
+## LICENSE
+[APACHE](https://www.apache.org/licenses/LICENSE-2.0.txt)
